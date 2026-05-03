@@ -1,0 +1,206 @@
+# ══════════════════════════════════════════════════════════════════════
+#  AURIS — GitHub Actions: Build Windows .exe
+#  Obiriec Labs © 2026
+#
+#  Trigger:
+#    - workflow_dispatch da ship_mac.sh (gh workflow run) con versione esplicita
+#    - Manuale da GitHub Actions tab → "Run workflow"
+#
+#  Segreti richiesti (AURIS → Settings → Secrets → Actions):
+#    PRIVATE_REPO_TOKEN — PAT con scope "repo" su ObiriecLabs/AURIS-Backup (sorgente privato)
+# ══════════════════════════════════════════════════════════════════════
+
+name: Build Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Versione (es: 1.3.0)'
+        required: true
+
+jobs:
+  build-windows:
+    name: Build AURIS.exe (Windows)
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      # ── Checkout repo PRIVATO (sorgente) ─────────────────────────────
+      - name: Checkout private source
+        uses: actions/checkout@v4.2.2
+        with:
+          repository: ObiriecLabs/AURIS-Backup
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+
+      # ── Versione ─────────────────────────────────────────────────────
+      - name: Determina versione
+        id: version
+        shell: bash
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "AURIS_VERSION=$VERSION"
+
+      # ── Python ────────────────────────────────────────────────────────
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5.5.0
+        with:
+          python-version: '3.11'
+
+      # ── Dipendenze ────────────────────────────────────────────────────
+      - name: Installa dipendenze
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller pywebview flask openai-whisper anthropic `
+            cryptography fpdf2 imageio-ffmpeg certifi yt-dlp tiktoken
+
+      # ── Download ffmpeg (bundled nel .exe) ────────────────────────────
+      # BtbN pubblica i build master come pre-release "autobuild-*", non come
+      # "latest" → usare la GitHub API per trovare dinamicamente l'asset corretto.
+      - name: Download ffmpeg Windows binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          New-Item -ItemType Directory -Force -Path "build/ffmpeg_bin" | Out-Null
+
+          Write-Host "  Ricerca asset ffmpeg win64-gpl via GitHub API..."
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept        = "application/vnd.github+json"
+          }
+          $asset = $null
+          $page  = 1
+          while (-not $asset -and $page -le 5) {
+            $releases = Invoke-RestMethod `
+              -Uri "https://api.github.com/repos/BtbN/ffmpeg-builds/releases?per_page=10&page=$page" `
+              -Headers $headers
+            if ($releases.Count -eq 0) { break }
+            foreach ($rel in $releases) {
+              $a = $rel.assets |
+                Where-Object { $_.name -match "win64-gpl\.zip$" -and $_.name -notmatch "shared" } |
+                Select-Object -First 1
+              if ($a) { $asset = $a; break }
+            }
+            $page++
+          }
+          if (-not $asset) {
+            Write-Error "  ERRORE: nessun asset ffmpeg win64-gpl trovato nelle ultime 50 release BtbN"
+            exit 1
+          }
+
+          Write-Host "  Download: $($asset.name)"
+          Invoke-WebRequest -Uri $asset.browser_download_url `
+            -OutFile "build/ffmpeg_bin/ffmpeg.zip" -Headers $headers
+          Expand-Archive "build/ffmpeg_bin/ffmpeg.zip" "build/ffmpeg_bin/extracted" -Force
+          $ffmpeg  = Get-ChildItem "build/ffmpeg_bin/extracted" -Recurse -Filter "ffmpeg.exe"  | Select-Object -First 1
+          $ffprobe = Get-ChildItem "build/ffmpeg_bin/extracted" -Recurse -Filter "ffprobe.exe" | Select-Object -First 1
+          Copy-Item $ffmpeg.FullName  "build/ffmpeg_bin/ffmpeg.exe"
+          Copy-Item $ffprobe.FullName "build/ffmpeg_bin/ffprobe.exe"
+          Write-Host "  OK: $($asset.name) → ffmpeg.exe + ffprobe.exe pronti"
+
+      # ── Build PyInstaller ─────────────────────────────────────────────
+      - name: Build AURIS.exe con PyInstaller
+        env:
+          AURIS_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          python -m PyInstaller `
+            --name "AURIS" `
+            --windowed `
+            --onedir `
+            --icon "static/assets/icon.ico" `
+            --add-data "templates;templates" `
+            --add-data "static;static" `
+            --add-data "core;core" `
+            --add-binary "build/ffmpeg_bin/ffmpeg.exe;." `
+            --add-binary "build/ffmpeg_bin/ffprobe.exe;." `
+            --hidden-import whisper `
+            --hidden-import whisper.utils `
+            --hidden-import webview `
+            --hidden-import webview.platforms.edgechromium `
+            --hidden-import webview.platforms.winforms `
+            --hidden-import flask `
+            --hidden-import flask.templating `
+            --hidden-import jinja2 `
+            --hidden-import werkzeug `
+            --hidden-import werkzeug.serving `
+            --hidden-import cryptography `
+            --hidden-import "cryptography.hazmat.primitives.asymmetric.ec" `
+            --hidden-import "cryptography.hazmat.primitives.hashes" `
+            --hidden-import "cryptography.hazmat.primitives.serialization" `
+            --hidden-import anthropic `
+            --hidden-import numba `
+            --hidden-import tiktoken `
+            --hidden-import "tiktoken_ext.openai_public" `
+            --hidden-import fpdf `
+            --hidden-import certifi `
+            --collect-data whisper `
+            --collect-data certifi `
+            --collect-submodules webview `
+            --collect-submodules tiktoken `
+            --distpath "build/dist" `
+            --workpath "build/build_tmp" `
+            --noconfirm `
+            main.py
+
+      # ── Version file ──────────────────────────────────────────────────
+      - name: Scrivi version.txt
+        run: |
+          @"
+          AURIS v${{ steps.version.outputs.version }}
+          Obiriec Labs (c) 2026
+          Build: ${{ github.run_id }}
+          "@ | Out-File -FilePath "build/dist/AURIS/version.txt" -Encoding UTF8
+
+      # ── NSIS installer ────────────────────────────────────────────────
+      - name: Installa NSIS
+        run: choco install nsis --yes --no-progress
+
+      - name: Aggiungi UTF-8 BOM al file NSIS
+        shell: pwsh
+        run: |
+          $nsiPath = "${{ github.workspace }}\installer\windows\AURIS.nsi"
+          $content  = [System.IO.File]::ReadAllBytes($nsiPath)
+          $bom      = [byte[]](0xEF, 0xBB, 0xBF)
+          if ($content[0] -ne 0xEF -or $content[1] -ne 0xBB -or $content[2] -ne 0xBF) {
+            $withBom = $bom + $content
+            [System.IO.File]::WriteAllBytes($nsiPath, $withBom)
+            Write-Host "  BOM UTF-8 aggiunto"
+          } else {
+            Write-Host "  BOM UTF-8 già presente"
+          }
+
+      - name: Crea installer NSIS
+        shell: pwsh
+        run: |
+          $version       = "${{ steps.version.outputs.version }}"
+          $distDir       = "${{ github.workspace }}\build\dist\AURIS"
+          $outDir        = "${{ github.workspace }}\build\dist"
+          $installerName = "AURIS-$version-Setup.exe"
+          $nsiScript     = "${{ github.workspace }}\installer\windows\AURIS.nsi"
+          & "C:\Program Files (x86)\NSIS\makensis.exe" `
+            /DAURIS_VERSION="$version" `
+            /DDIST_DIR="$distDir" `
+            /DOUT_DIR="$outDir" `
+            /DINSTALLER_NAME="$installerName" `
+            $nsiScript
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "makensis fallito con codice $LASTEXITCODE"
+            exit $LASTEXITCODE
+          }
+          Write-Host "  OK: $installerName creato"
+
+      # ── Upload su Release in AURIS (repo pubblico) ────────────────────
+      - name: Carica installer su GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SETUP="build/dist/AURIS-${VERSION}-Setup.exe"
+          gh release upload "v${VERSION}" "${SETUP}" \
+            --repo "ObiriecLabs/AURIS" --clobber
+          echo "  Caricato: AURIS-${VERSION}-Setup.exe"
