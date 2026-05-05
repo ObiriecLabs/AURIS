@@ -179,7 +179,7 @@ jobs:
           $version       = "${{ steps.version.outputs.version }}"
           $distDir       = "${{ github.workspace }}\build\dist\AURIS"
           $outDir        = "${{ github.workspace }}\build\dist"
-          $installerName = "AURIS-$version-Setup.exe"
+          $installerName = "AURIS-Setup.exe"
           $nsiScript     = "${{ github.workspace }}\installer\windows\AURIS.nsi"
           & "C:\Program Files (x86)\NSIS\makensis.exe" `
             /DAURIS_VERSION="$version" `
@@ -200,7 +200,7 @@ jobs:
         shell: bash
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          SETUP="build/dist/AURIS-${VERSION}-Setup.exe"
+          SETUP="build/dist/AURIS-Setup.exe"
           gh release upload "v${VERSION}" "${SETUP}" \
             --repo "ObiriecLabs/AURIS" --clobber
-          echo "  Caricato: AURIS-${VERSION}-Setup.exe"
+          echo "  Caricato: AURIS-Setup.exe"
